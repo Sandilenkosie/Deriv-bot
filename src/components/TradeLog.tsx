@@ -21,6 +21,7 @@ interface TradeLogProps {
   connected: boolean;
   onStart: () => void;
   onStop: () => void;
+  statusMessage: string;
 }
 
 export default function TradeLog({
@@ -33,6 +34,7 @@ export default function TradeLog({
   connected,
   onStart,
   onStop,
+  statusMessage,
 }: TradeLogProps) {
   const displayTrades = [...trades].reverse();
 
@@ -110,6 +112,12 @@ export default function TradeLog({
             </p>
           </div>
         </div>
+
+        {statusMessage && (
+          <div className="mt-3 rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-300">
+            {statusMessage}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
