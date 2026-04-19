@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./index.css";
+import { Toaster, toast } from "sonner";
 import { derivApi, type DerivMessage } from "./services/derivApi";
 import Header from "./components/Header";
 import BotConfigPanel, { type BotConfig } from "./components/BotConfigPanel";
@@ -74,6 +75,24 @@ export default function App() {
   useEffect(() => {
     configRef.current = config;
   }, [config]);
+
+  const lastToastMsgRef = useRef("");
+
+  useEffect(() => {
+    if (!statusMsg || statusMsg === lastToastMsgRef.current) return;
+    lastToastMsgRef.current = statusMsg;
+
+    if (statusMsg.startsWith("Error") || statusMsg.startsWith("Stop Loss")) {
+      toast.error(statusMsg);
+      return;
+    }
+    if (statusMsg.startsWith("Take Profit")) {
+      toast.success(statusMsg);
+      return;
+    }
+
+    toast(statusMsg);
+  }, [statusMsg]);
 
   function getPredictedDigitRate(predictedDigit: number): number {
     const sample = lastDigitsRef.current.slice(-DIGIT_RATE_LOOKBACK);
@@ -563,6 +582,16 @@ export default function App() {
         connError={connError}
       />
 
+      <Toaster
+        richColors
+        closeButton
+        position="top-right"
+        toastOptions={{
+          duration: 3500,
+          className: "bg-gray-900 text-gray-100 border border-gray-700",
+        }}
+      />
+
       <main className="flex-1 min-h-0 overflow-hidden px-3 py-3 sm:px-4 sm:py-4 grid grid-cols-[340px_minmax(0,1fr)] gap-4 max-w-[1440px] mx-auto w-full">
         {/* Left sidebar */}
         <div className="flex flex-col gap-4 h-full min-h-0 overflow-hidden">
@@ -591,7 +620,6 @@ export default function App() {
                 connected={connected}
                 onStart={startBot}
                 onStop={stopBot}
-                statusMessage={statusMsg}
               />
             </div>
             <div className="flex-1 min-h-0">
