@@ -3,8 +3,9 @@ export interface TradeRecord {
   contractId?: string;
   time: string;
   symbol: string;
-  contractType: "CALL" | "PUT" | "DIGITDIFF";
+  contractType: "CALL" | "PUT" | "DIGITDIFF" | "ACCU";
   barrier?: number;
+  accumulatorLabelRate?: number;
   stake: number;
   payout: number | null;
   profit: number | null;
@@ -13,6 +14,7 @@ export interface TradeRecord {
 
 interface TradeLogProps {
   trades: TradeRecord[];
+  accumulatorDefaultLabelRate: number;
   totalProfit: number;
   totalTrades: number;
   wins: number;
@@ -25,6 +27,7 @@ interface TradeLogProps {
 
 export default function TradeLog({
   trades,
+  accumulatorDefaultLabelRate,
   totalProfit,
   totalTrades,
   wins,
@@ -152,6 +155,15 @@ export default function TradeLog({
                     {t.contractType === "DIGITDIFF" ? (
                       <span className="font-semibold text-purple-400">
                         ≠ {t.barrier ?? "?"}
+                      </span>
+                    ) : t.contractType === "ACCU" ? (
+                      <span className="font-semibold text-cyan-400">
+                        Accu{" "}
+                        {(Number.isFinite(t.accumulatorLabelRate)
+                          ? Number(t.accumulatorLabelRate)
+                          : accumulatorDefaultLabelRate
+                        ).toFixed(0)}
+                        %
                       </span>
                     ) : (
                       <span

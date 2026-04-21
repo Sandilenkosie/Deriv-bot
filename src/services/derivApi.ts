@@ -108,11 +108,41 @@ class DerivApiService {
     });
   }
 
+  buyAccumulatorContract(params: {
+    symbol: string;
+    amount: number;
+    growthRatePercent: number;
+  }) {
+    const rawRate = Number(params.growthRatePercent);
+    const decimalRate = rawRate > 0.05 ? rawRate / 100 : rawRate;
+    const growthRate = Math.min(0.05, Math.max(0.01, decimalRate));
+
+    return this.send({
+      buy: 1,
+      price: params.amount,
+      parameters: {
+        contract_type: "ACCU",
+        symbol: params.symbol,
+        amount: params.amount,
+        basis: "stake",
+        growth_rate: Number(growthRate.toFixed(2)),
+        currency: "USD",
+      },
+    });
+  }
+
   subscribeOpenContract(contractId: string) {
     return this.send({
       proposal_open_contract: 1,
       contract_id: contractId,
       subscribe: 1,
+    });
+  }
+
+  sellContract(contractId: string, price = 0) {
+    return this.send({
+      sell: contractId,
+      price,
     });
   }
 

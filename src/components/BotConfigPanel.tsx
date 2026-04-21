@@ -1,12 +1,19 @@
+import { useEffect } from "react";
+
 export interface BotConfig {
   symbol: string;
-  strategy: "RISE_FALL" | "DIGITS_DIFFER";
+  strategy: "RISE_FALL" | "DIGITS_DIFFER" | "ACCUMULATOR";
   contractType: "CALL" | "PUT" | "AUTO";
   digitPrediction: number;
   duration: number;
   durationUnit: string;
   initialStake: number;
   takeProfit: number;
+  accumulatorTakeProfitMode: "USD" | "TICKS";
+  accumulatorTakeProfitTicks: number;
+  accumulatorGrowthRate: number;
+  accumulatorMartingaleGrowthRate: number;
+  accumulatorMartingaleMultiplier: number;
   stopLoss: number;
   martingale: boolean;
   martingaleMultiplier: number;
@@ -57,18 +64,28 @@ function Field({
 }
 
 function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  const normalizedProps = { ...props };
+  if ("value" in normalizedProps && normalizedProps.value === undefined) {
+    normalizedProps.value = "";
+  }
+
   return (
     <input
-      {...props}
+      {...normalizedProps}
       className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-red-500 transition-colors disabled:opacity-50"
     />
   );
 }
 
 function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  const normalizedProps = { ...props };
+  if ("value" in normalizedProps && normalizedProps.value === undefined) {
+    normalizedProps.value = "";
+  }
+
   return (
     <select
-      {...props}
+      {...normalizedProps}
       className="w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-red-500 transition-colors disabled:opacity-50"
     />
   );
@@ -79,8 +96,40 @@ export default function BotConfigPanel({
   onChange,
   disabled,
 }: BotConfigPanelProps) {
+  const isAccumulator = config.strategy === "ACCUMULATOR";
+
   const set = <K extends keyof BotConfig>(key: K, value: BotConfig[K]) =>
     onChange({ ...config, [key]: value });
+
+  useEffect(() => {
+    // Ensure delay modes never stay enabled together.
+    if (config.holdStakeUntilLowDigitRate && config.holdStakeUntilTradeCount) {
+      onChange({ ...config, holdStakeUntilTradeCount: false });
+    }
+  }, [config, onChange]);
+
+  useEffect(() => {
+    if (!isAccumulator) return;
+    const updates: Partial<BotConfig> = {};
+    if (config.durationUnit !== "t") {
+      updates.durationUnit = "t";
+    }
+    if (
+      config.accumulatorMartingaleGrowthRate === undefined ||
+      !Number.isFinite(config.accumulatorMartingaleGrowthRate)
+    ) {
+      updates.accumulatorMartingaleGrowthRate = 2;
+    }
+    if (
+      config.accumulatorMartingaleMultiplier === undefined ||
+      !Number.isFinite(config.accumulatorMartingaleMultiplier)
+    ) {
+      updates.accumulatorMartingaleMultiplier = 1;
+    }
+    if (Object.keys(updates).length > 0) {
+      onChange({ ...config, ...updates });
+    }
+  }, [config, isAccumulator, onChange]);
 
   return (
     <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
@@ -132,6 +181,7 @@ export default function BotConfigPanel({
           >
             <option value="DIGITS_DIFFER">Digits Differ</option>
             <option value="RISE_FALL">Rise / Fall</option>
+            <option value="ACCUMULATOR">Accumulator</option>
           </Select>
         </Field>
 
@@ -149,7 +199,7 @@ export default function BotConfigPanel({
               ))}
             </Select>
           </Field>
-        ) : (
+        ) : config.strategy === "RISE_FALL" ? (
           <Field label="Contract Type">
             <Select
               value={config.contractType}
@@ -163,32 +213,38 @@ export default function BotConfigPanel({
               <option value="PUT">Fall (PUT)</option>
             </Select>
           </Field>
-        )}
+        ) : null}
 
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Duration">
-            <Input
-              type="number"
-              min={1}
-              value={config.duration}
-              onChange={(e) => set("duration", Number(e.target.value))}
-              disabled={disabled}
-            />
-          </Field>
-          <Field label="Unit">
-            <Select
-              value={config.durationUnit}
-              onChange={(e) => set("durationUnit", e.target.value)}
-              disabled={disabled}
-            >
-              {DURATION_UNITS.map((u) => (
-                <option key={u.value} value={u.value}>
-                  {u.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
+        {isAccumulator ? (
+          <div className="rounded-lg border border-cyan-800/60 bg-cyan-900/20 px-3 py-2 text-[11px] text-cyan-200">
+            Accumulator contracts are no-expiry. Duration is not used.
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Duration">
+              <Input
+                type="number"
+                min={1}
+                value={config.duration}
+                onChange={(e) => set("duration", Number(e.target.value))}
+                disabled={disabled}
+              />
+            </Field>
+            <Field label="Unit">
+              <Select
+                value={config.durationUnit}
+                onChange={(e) => set("durationUnit", e.target.value)}
+                disabled={disabled}
+              >
+                {DURATION_UNITS.map((u) => (
+                  <option key={u.value} value={u.value}>
+                    {u.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        )}
 
         <Field label="Initial Stake (USD)">
           <Input
@@ -202,16 +258,34 @@ export default function BotConfigPanel({
         </Field>
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Take Profit (USD)">
-            <Input
-              type="number"
-              min={0}
-              step={0.01}
-              value={config.takeProfit}
-              onChange={(e) => set("takeProfit", Number(e.target.value))}
-              disabled={disabled}
-            />
-          </Field>
+          {isAccumulator ? (
+            <Field label="Take Profit Mode">
+              <Select
+                value={config.accumulatorTakeProfitMode}
+                onChange={(e) =>
+                  set(
+                    "accumulatorTakeProfitMode",
+                    e.target.value as BotConfig["accumulatorTakeProfitMode"],
+                  )
+                }
+                disabled={disabled}
+              >
+                <option value="USD">USD</option>
+                <option value="TICKS">Ticks</option>
+              </Select>
+            </Field>
+          ) : (
+            <Field label="Take Profit (USD)">
+              <Input
+                type="number"
+                min={0}
+                step={0.01}
+                value={config.takeProfit}
+                onChange={(e) => set("takeProfit", Number(e.target.value))}
+                disabled={disabled}
+              />
+            </Field>
+          )}
           <Field label="Stop Loss (USD)">
             <Input
               type="number"
@@ -224,62 +298,168 @@ export default function BotConfigPanel({
           </Field>
         </div>
 
+        {isAccumulator && (
+          <Field
+            label={
+              config.accumulatorTakeProfitMode === "USD"
+                ? "Take Profit (USD)"
+                : "Take Profit (Ticks)"
+            }
+          >
+            <Input
+              type="number"
+              min={config.accumulatorTakeProfitMode === "USD" ? 0 : 1}
+              step={config.accumulatorTakeProfitMode === "USD" ? 0.01 : 1}
+              value={
+                config.accumulatorTakeProfitMode === "USD"
+                  ? config.takeProfit
+                  : config.accumulatorTakeProfitTicks
+              }
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                if (config.accumulatorTakeProfitMode === "USD") {
+                  set("takeProfit", next);
+                } else {
+                  set("accumulatorTakeProfitTicks", next);
+                }
+              }}
+              disabled={disabled}
+            />
+          </Field>
+        )}
+
         <div className="bg-gray-900/50 rounded-lg p-3 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-gray-300 text-sm font-medium">
               Martingale
             </span>
             <button
+              type="button"
               onClick={() => set("martingale", !config.martingale)}
               disabled={disabled}
-              className={`relative w-10 h-5 rounded-full transition-colors ${config.martingale ? "bg-red-600" : "bg-gray-600"} disabled:opacity-50`}
+              aria-pressed={config.martingale}
+              className={`inline-flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                config.martingale
+                  ? "border-red-500 bg-red-600/15 text-red-100"
+                  : "border-gray-600 bg-gray-800 text-gray-300"
+              }`}
             >
+              <span>{config.martingale ? "ON" : "OFF"}</span>
               <span
-                className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${config.martingale ? "translate-x-5" : "translate-x-0.5"}`}
-              />
+                className={`relative h-5 w-9 rounded-full border transition-colors ${
+                  config.martingale
+                    ? "border-red-400 bg-red-500/30"
+                    : "border-gray-500 bg-gray-700"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow transition-all ${
+                    config.martingale ? "right-0.5" : "left-0.5"
+                  }`}
+                />
+              </span>
             </button>
           </div>
+
+          <p className="text-[11px] text-gray-400">
+            {isAccumulator
+              ? "Accumulator martingale applies growth percent and multiplier together after a loss."
+              : "Multiplies stake after losses using your configured multiplier and split rules."}
+          </p>
           {config.martingale && (
             <>
-              <Field label="Multiplier on loss">
-                <Input
-                  type="number"
-                  min={1.1}
-                  max={50}
-                  step={0.1}
-                  value={config.martingaleMultiplier}
-                  onChange={(e) =>
-                    set("martingaleMultiplier", Number(e.target.value))
-                  }
-                  disabled={disabled}
-                />
-              </Field>
-              {config.strategy === "DIGITS_DIFFER" && (
+              {isAccumulator ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Growth per loss (%)">
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      value={config.accumulatorMartingaleGrowthRate}
+                      onChange={(e) =>
+                        set(
+                          "accumulatorMartingaleGrowthRate",
+                          Number(e.target.value),
+                        )
+                      }
+                      disabled={disabled}
+                    />
+                  </Field>
+                  <Field label="Multiplier on loss">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={0.01}
+                      value={config.accumulatorMartingaleMultiplier}
+                      onChange={(e) =>
+                        set(
+                          "accumulatorMartingaleMultiplier",
+                          Number(e.target.value),
+                        )
+                      }
+                      disabled={disabled}
+                    />
+                  </Field>
+                </div>
+              ) : (
+                <Field label="Multiplier on loss">
+                  <Input
+                    type="number"
+                    min={1.1}
+                    max={50}
+                    step={0.1}
+                    value={config.martingaleMultiplier}
+                    onChange={(e) =>
+                      set("martingaleMultiplier", Number(e.target.value))
+                    }
+                    disabled={disabled}
+                  />
+                </Field>
+              )}
+              {config.strategy === "DIGITS_DIFFER" && !isAccumulator && (
                 <>
                   <Field label="Split recovery trades">
                     <div className="grid grid-cols-3 gap-2">
-                      {([1, 2, 3] as const).map((n) => (
-                        <button
-                          key={n}
-                          onClick={() => set("martingaleSplit", n)}
-                          disabled={disabled}
-                          className={`py-1.5 rounded-lg text-sm font-semibold border transition-colors disabled:opacity-50 ${
-                            config.martingaleSplit === n
-                              ? "bg-red-600 border-red-500 text-white"
-                              : "bg-gray-800 border-gray-600 text-gray-300 hover:border-red-500"
-                          }`}
-                        >
-                          {n === 1 ? "1× full" : `${n}× split`}
-                        </button>
-                      ))}
+                      {([1, 2, 3] as const).map((n) => {
+                        const perTradeMultiplier = (
+                          config.martingaleMultiplier / n
+                        ).toFixed(1);
+
+                        return (
+                          <label
+                            key={n}
+                            className={`group ${
+                              disabled
+                                ? "pointer-events-none opacity-50"
+                                : "cursor-pointer"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="martingale-split"
+                              value={n}
+                              checked={config.martingaleSplit === n}
+                              onChange={() => set("martingaleSplit", n)}
+                              disabled={disabled}
+                              className="peer sr-only"
+                            />
+                            <span className="flex min-h-[66px] flex-col justify-between rounded-xl border border-gray-600 bg-gray-800 px-3 py-2.5 transition-colors peer-checked:border-red-400 peer-checked:bg-red-600/15 peer-focus-visible:ring-2 peer-focus-visible:ring-red-400/70 group-hover:border-red-300/80">
+                              <span className="flex items-center gap-2 text-sm font-semibold text-gray-100">
+                                <span className="flex h-4 w-4 items-center justify-center rounded-full border border-gray-400 bg-gray-900 peer-checked:border-red-400 peer-checked:bg-red-500/20">
+                                  <span className="h-2 w-2 scale-0 rounded-full bg-red-400 transition-transform peer-checked:scale-100" />
+                                </span>
+                                {n === 1 ? "1x full" : `${n}x split`}
+                              </span>
+                              <span className="text-[11px] text-gray-400 peer-checked:text-red-100">
+                                x{perTradeMultiplier} each trade
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
                     </div>
-                    <p className="text-gray-500 text-xs mt-1">
-                      ×1 = one ×{config.martingaleMultiplier} trade
-                      &nbsp;|&nbsp; ×2 = two ×
-                      {(config.martingaleMultiplier / 2).toFixed(1)} trades
-                      &nbsp;|&nbsp; ×3 = three ×
-                      {(config.martingaleMultiplier / 3).toFixed(1)} trades
-                    </p>
                   </Field>
 
                   <div className="bg-gray-900/70 rounded-lg p-3 space-y-3 border border-gray-700">
@@ -288,20 +468,51 @@ export default function BotConfigPanel({
                         Delay martingale by digit %
                       </span>
                       <button
+                        type="button"
                         onClick={() =>
-                          set(
-                            "holdStakeUntilLowDigitRate",
-                            !config.holdStakeUntilLowDigitRate,
-                          )
+                          onChange({
+                            ...config,
+                            holdStakeUntilLowDigitRate:
+                              !config.holdStakeUntilLowDigitRate,
+                            holdStakeUntilTradeCount:
+                              config.holdStakeUntilLowDigitRate
+                                ? config.holdStakeUntilTradeCount
+                                : false,
+                          })
                         }
                         disabled={disabled}
-                        className={`relative w-10 h-5 rounded-full transition-colors ${config.holdStakeUntilLowDigitRate ? "bg-red-600" : "bg-gray-600"} disabled:opacity-50`}
+                        aria-pressed={config.holdStakeUntilLowDigitRate}
+                        className={`inline-flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                          config.holdStakeUntilLowDigitRate
+                            ? "border-red-500 bg-red-600/15 text-red-100"
+                            : "border-gray-600 bg-gray-800 text-gray-300"
+                        }`}
                       >
+                        <span>
+                          {config.holdStakeUntilLowDigitRate ? "ON" : "OFF"}
+                        </span>
                         <span
-                          className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${config.holdStakeUntilLowDigitRate ? "translate-x-5" : "translate-x-0.5"}`}
-                        />
+                          className={`relative h-5 w-9 rounded-full border transition-colors ${
+                            config.holdStakeUntilLowDigitRate
+                              ? "border-red-400 bg-red-500/30"
+                              : "border-gray-500 bg-gray-700"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow transition-all ${
+                              config.holdStakeUntilLowDigitRate
+                                ? "right-0.5"
+                                : "left-0.5"
+                            }`}
+                          />
+                        </span>
                       </button>
                     </div>
+
+                    <p className="text-[11px] text-gray-400">
+                      Keeps using hold stake until the predicted digit rate
+                      drops below your threshold.
+                    </p>
 
                     {config.holdStakeUntilLowDigitRate && (
                       <div className="grid grid-cols-2 gap-3">
@@ -340,20 +551,51 @@ export default function BotConfigPanel({
                         Delay martingale by trades
                       </span>
                       <button
+                        type="button"
                         onClick={() =>
-                          set(
-                            "holdStakeUntilTradeCount",
-                            !config.holdStakeUntilTradeCount,
-                          )
+                          onChange({
+                            ...config,
+                            holdStakeUntilTradeCount:
+                              !config.holdStakeUntilTradeCount,
+                            holdStakeUntilLowDigitRate:
+                              config.holdStakeUntilTradeCount
+                                ? config.holdStakeUntilLowDigitRate
+                                : false,
+                          })
                         }
                         disabled={disabled}
-                        className={`relative w-10 h-5 rounded-full transition-colors ${config.holdStakeUntilTradeCount ? "bg-red-600" : "bg-gray-600"} disabled:opacity-50`}
+                        aria-pressed={config.holdStakeUntilTradeCount}
+                        className={`inline-flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                          config.holdStakeUntilTradeCount
+                            ? "border-red-500 bg-red-600/15 text-red-100"
+                            : "border-gray-600 bg-gray-800 text-gray-300"
+                        }`}
                       >
+                        <span>
+                          {config.holdStakeUntilTradeCount ? "ON" : "OFF"}
+                        </span>
                         <span
-                          className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${config.holdStakeUntilTradeCount ? "translate-x-5" : "translate-x-0.5"}`}
-                        />
+                          className={`relative h-5 w-9 rounded-full border transition-colors ${
+                            config.holdStakeUntilTradeCount
+                              ? "border-red-400 bg-red-500/30"
+                              : "border-gray-500 bg-gray-700"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow transition-all ${
+                              config.holdStakeUntilTradeCount
+                                ? "right-0.5"
+                                : "left-0.5"
+                            }`}
+                          />
+                        </span>
                       </button>
                     </div>
+
+                    <p className="text-[11px] text-gray-400">
+                      Waits for a fixed number of hold trades before applying
+                      martingale.
+                    </p>
 
                     {config.holdStakeUntilTradeCount && (
                       <div className="grid grid-cols-2 gap-3">

@@ -16,6 +16,11 @@ const DEFAULT_CONFIG: BotConfig = {
   durationUnit: "t",
   initialStake: 1,
   takeProfit: 10,
+  accumulatorTakeProfitMode: "USD",
+  accumulatorTakeProfitTicks: 20,
+  accumulatorGrowthRate: 1,
+  accumulatorMartingaleGrowthRate: 2,
+  accumulatorMartingaleMultiplier: 1,
   stopLoss: 10,
   martingale: true,
   martingaleMultiplier: 11,
@@ -29,6 +34,107 @@ const DEFAULT_CONFIG: BotConfig = {
 
 const DIGIT_RATE_LOOKBACK = 500;
 const TRADE_HISTORY_LIMIT = 500;
+
+type TaskCallback = () => void;
+
+interface BackgroundScheduler {
+  schedule: (cb: TaskCallback, delayMs: number) => number;
+  cancel: (id: number) => void;
+  dispose: () => void;
+}
+
+function createBackgroundScheduler(): BackgroundScheduler {
+  let nextId = 1;
+  const callbacks = new Map<number, TaskCallback>();
+  const fallbackTimeouts = new Map<number, number>();
+  let worker: Worker | null = null;
+  let workerScriptUrl: string | null = null;
+
+  const clearCallback = (id: number) => {
+    callbacks.delete(id);
+    const timeoutId = fallbackTimeouts.get(id);
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      fallbackTimeouts.delete(id);
+    }
+  };
+
+  try {
+    const workerCode = `
+      const timers = new Map();
+      self.onmessage = (event) => {
+        const data = event.data || {};
+        if (data.action === "schedule") {
+          const timerId = setTimeout(() => {
+            self.postMessage({ id: data.id });
+            timers.delete(data.id);
+          }, data.delayMs || 0);
+          timers.set(data.id, timerId);
+          return;
+        }
+        if (data.action === "cancel") {
+          const timerId = timers.get(data.id);
+          if (timerId !== undefined) {
+            clearTimeout(timerId);
+            timers.delete(data.id);
+          }
+        }
+      };
+    `;
+    workerScriptUrl = URL.createObjectURL(
+      new Blob([workerCode], { type: "application/javascript" }),
+    );
+    worker = new Worker(workerScriptUrl);
+    worker.onmessage = (event: MessageEvent<{ id?: number }>) => {
+      const id = Number(event.data?.id);
+      if (!Number.isFinite(id)) return;
+      const cb = callbacks.get(id);
+      if (!cb) return;
+      callbacks.delete(id);
+      cb();
+    };
+  } catch {
+    worker = null;
+  }
+
+  return {
+    schedule(cb, delayMs) {
+      const id = nextId++;
+      callbacks.set(id, cb);
+      if (worker) {
+        worker.postMessage({ action: "schedule", id, delayMs });
+      } else {
+        const timeoutId = window.setTimeout(() => {
+          const run = callbacks.get(id);
+          if (!run) return;
+          callbacks.delete(id);
+          fallbackTimeouts.delete(id);
+          run();
+        }, delayMs);
+        fallbackTimeouts.set(id, timeoutId);
+      }
+      return id;
+    },
+    cancel(id) {
+      clearCallback(id);
+      if (worker) {
+        worker.postMessage({ action: "cancel", id });
+      }
+    },
+    dispose() {
+      const ids = Array.from(callbacks.keys());
+      ids.forEach((id) => clearCallback(id));
+      if (worker) {
+        worker.terminate();
+        worker = null;
+      }
+      if (workerScriptUrl) {
+        URL.revokeObjectURL(workerScriptUrl);
+        workerScriptUrl = null;
+      }
+    },
+  };
+}
 
 function nowStr() {
   return new Date().toLocaleTimeString();
@@ -52,6 +158,7 @@ export default function App() {
 
   // Last-digit chart state
   const [lastDigits, setLastDigits] = useState<number[]>([]);
+  const [priceHistory, setPriceHistory] = useState<number[]>([]);
   const [currentPrice, setCurrentPrice] = useState("");
   const subscribedSymbolRef = useRef<string | null>(null);
   const lastDigitsRef = useRef<number[]>([]);
@@ -71,10 +178,32 @@ export default function App() {
   const delayedMartingaleSplitRemainingRef = useRef(0);
   // split-martingale: how many recovery trades still need to win (0 = normal)
   const splitRemainingRef = useRef(0);
+  const accumulatorTickProfitRef = useRef(0);
+  const accumulatorSellPendingRef = useRef<Set<string>>(new Set());
+  const accumulatorContractTickCountRef = useRef<Map<string, number>>(
+    new Map(),
+  );
+  const accumulatorContractLastSpotTimeRef = useRef<
+    Map<string, string | number>
+  >(new Map());
+  const schedulerRef = useRef<BackgroundScheduler | null>(null);
+  const scheduledTradeTaskRef = useRef<number | null>(null);
 
   useEffect(() => {
     configRef.current = config;
   }, [config]);
+
+  useEffect(() => {
+    schedulerRef.current = createBackgroundScheduler();
+    return () => {
+      if (schedulerRef.current && scheduledTradeTaskRef.current !== null) {
+        schedulerRef.current.cancel(scheduledTradeTaskRef.current);
+      }
+      schedulerRef.current?.dispose();
+      schedulerRef.current = null;
+      scheduledTradeTaskRef.current = null;
+    };
+  }, []);
 
   const lastToastMsgRef = useRef("");
 
@@ -153,6 +282,44 @@ export default function App() {
     };
   }
 
+  function clearScheduledTrade() {
+    const taskId = scheduledTradeTaskRef.current;
+    if (taskId === null) return;
+    schedulerRef.current?.cancel(taskId);
+    scheduledTradeTaskRef.current = null;
+  }
+
+  function queueNextTrade(delayMs: number) {
+    clearScheduledTrade();
+    if (!runningRef.current) return;
+    if (!schedulerRef.current) {
+      placeNextTrade();
+      return;
+    }
+    scheduledTradeTaskRef.current = schedulerRef.current.schedule(() => {
+      scheduledTradeTaskRef.current = null;
+      if (runningRef.current) {
+        placeNextTrade();
+      }
+    }, delayMs);
+  }
+
+  function closeTrackedOpenContracts(reason?: string) {
+    const contractIds = Array.from(openTradeIdsRef.current);
+    contractIds.forEach((contractId) => {
+      derivApi.sellContract(contractId);
+      derivApi.unsubscribeOpenContract(contractId);
+    });
+    openTradeIdsRef.current.clear();
+    openContractIdRef.current = null;
+    accumulatorSellPendingRef.current.clear();
+    accumulatorContractTickCountRef.current.clear();
+    accumulatorContractLastSpotTimeRef.current.clear();
+    if (reason) {
+      setStatusMsg(reason);
+    }
+  }
+
   // Re-subscribe ticks when the symbol changes
   useEffect(() => {
     if (!connected) return;
@@ -161,6 +328,7 @@ export default function App() {
       derivApi.unsubscribeTicks(subscribedSymbolRef.current);
     }
     setLastDigits([]);
+    setPriceHistory([]);
     setCurrentPrice("");
     derivApi.subscribeTicks(config.symbol);
     subscribedSymbolRef.current = config.symbol;
@@ -196,6 +364,10 @@ export default function App() {
       const digit = Number(lastChar);
       if (Number.isInteger(digit) && digit >= 0 && digit <= 9) {
         setCurrentPrice(formattedQuote);
+        setPriceHistory((prev) => {
+          const next = [...prev, rawQuote];
+          return next.length > 1000 ? next.slice(-1000) : next;
+        });
         setLastDigits((prev) => {
           const next = [...prev, digit];
           const trimmed = next.length > 1000 ? next.slice(-1000) : next;
@@ -210,11 +382,16 @@ export default function App() {
         const errMsg =
           ((msg.error as Record<string, unknown>)?.message as string) ??
           "Buy error";
+        if (/too many open positions/i.test(errMsg)) {
+          closeTrackedOpenContracts(
+            "Open position limit reached: closing tracked contracts and stopping bot.",
+          );
+          stopBot();
+          return;
+        }
         setStatusMsg(`Error: ${errMsg}`);
         openContractIdRef.current = null;
-        setTimeout(() => {
-          if (runningRef.current) placeNextTrade();
-        }, 2000);
+        queueNextTrade(1500);
         return;
       }
       const buy = msg.buy as Record<string, unknown>;
@@ -224,11 +401,7 @@ export default function App() {
         setStatusMsg("Error: contract id missing from buy response.");
         openContractIdRef.current = null;
         setTrades((prev) => prev.filter((t) => t.id !== tempId));
-        if (runningRef.current) {
-          setTimeout(() => {
-            if (runningRef.current) placeNextTrade();
-          }, 2000);
-        }
+        queueNextTrade(1500);
         return;
       }
       openContractIdRef.current = contractId;
@@ -246,12 +419,86 @@ export default function App() {
       const contractId = String(poc.contract_id ?? "");
       if (!openTradeIdsRef.current.has(contractId)) return;
 
-      const isSettled = Number(poc.is_sold) === 1 || poc.status === "sold";
+      const cfg = configRef.current;
+      const currentSpotTime =
+        (poc.current_spot_time as string | number | undefined) ??
+        (poc.exit_tick_time as string | number | undefined);
+      let normalizedLiveTickCount =
+        accumulatorContractTickCountRef.current.get(contractId) ?? 0;
+
+      if (cfg.strategy === "ACCUMULATOR" && currentSpotTime !== undefined) {
+        const lastSpotTime =
+          accumulatorContractLastSpotTimeRef.current.get(contractId);
+
+        if (lastSpotTime === undefined) {
+          normalizedLiveTickCount = 1;
+          accumulatorContractTickCountRef.current.set(contractId, 1);
+          accumulatorContractLastSpotTimeRef.current.set(
+            contractId,
+            currentSpotTime,
+          );
+        } else if (lastSpotTime !== currentSpotTime) {
+          normalizedLiveTickCount += 1;
+          accumulatorContractTickCountRef.current.set(
+            contractId,
+            normalizedLiveTickCount,
+          );
+          accumulatorContractLastSpotTimeRef.current.set(
+            contractId,
+            currentSpotTime,
+          );
+        }
+      }
+
+      if (
+        cfg.strategy === "ACCUMULATOR" &&
+        cfg.accumulatorTakeProfitMode === "TICKS" &&
+        cfg.accumulatorTakeProfitTicks > 0 &&
+        normalizedLiveTickCount >= cfg.accumulatorTakeProfitTicks &&
+        Number(poc.is_sold) !== 1 &&
+        poc.status !== "sold" &&
+        !accumulatorSellPendingRef.current.has(contractId)
+      ) {
+        accumulatorSellPendingRef.current.add(contractId);
+        accumulatorTickProfitRef.current = normalizedLiveTickCount;
+        setStatusMsg(
+          `Take Profit reached: ${normalizedLiveTickCount} accumulator ticks — closing contract…`,
+        );
+        derivApi.sellContract(contractId);
+        return;
+      }
+
+      const status = String(poc.status ?? "").toLowerCase();
+      const isSettled =
+        Number(poc.is_sold) === 1 ||
+        status === "sold" ||
+        status === "won" ||
+        status === "lost" ||
+        status === "expired" ||
+        status === "cancelled";
       if (!isSettled) return;
 
       const profit = Number(poc.profit ?? 0);
-      const won = profit > 0;
+      // Prefer terminal status over live profit fields.
+      const won =
+        status === "won"
+          ? true
+          : status === "lost" || status === "expired" || status === "cancelled"
+            ? false
+            : profit > 0;
+      console.log("[Bot] Settlement", {
+        contractId,
+        status,
+        is_sold: poc.is_sold,
+        profit,
+        sell_price: poc.sell_price,
+        won,
+        martingale: configRef.current.martingale,
+        strategy: configRef.current.strategy,
+        growthRate: configRef.current.accumulatorMartingaleGrowthRate,
+      });
       const stake = currentStakeRef.current;
+      const settledTicks = normalizedLiveTickCount;
 
       setTrades((prev) =>
         prev.map((t) =>
@@ -269,7 +516,12 @@ export default function App() {
       netProfitRef.current += profit;
       setTotalProfit(netProfitRef.current);
 
-      const cfg = configRef.current;
+      if (
+        cfg.strategy === "ACCUMULATOR" &&
+        cfg.accumulatorTakeProfitMode === "TICKS"
+      ) {
+        accumulatorTickProfitRef.current = settledTicks;
+      }
 
       if (won) {
         winsRef.current += 1;
@@ -301,64 +553,115 @@ export default function App() {
         }
       } else {
         if (cfg.martingale) {
-          const shouldDelayMartingale =
-            cfg.strategy === "DIGITS_DIFFER" &&
-            (cfg.holdStakeUntilLowDigitRate || cfg.holdStakeUntilTradeCount) &&
-            Math.abs(stake - cfg.holdStakeAmount) < 0.0001;
-
-          if (shouldDelayMartingale) {
-            const predictedRate = cfg.holdStakeUntilLowDigitRate
-              ? getPredictedDigitRate(cfg.digitPrediction)
-              : null;
-            const shouldHoldForDigitRate =
-              cfg.holdStakeUntilLowDigitRate &&
-              predictedRate !== null &&
-              predictedRate >= cfg.digitRateThreshold;
-            const shouldHoldForTradeCount = cfg.holdStakeUntilTradeCount;
-
-            if (shouldHoldForDigitRate || shouldHoldForTradeCount) {
-              const split =
-                cfg.strategy === "DIGITS_DIFFER" ? cfg.martingaleSplit : 1;
-              delayedMartingaleTargetStakeRef.current = parseFloat(
-                (
-                  (cfg.holdStakeAmount * cfg.martingaleMultiplier) /
-                  split
-                ).toFixed(2),
-              );
-              delayedMartingaleSplitRemainingRef.current = split;
-              pendingDelayedMartingaleRef.current = true;
-              pendingDelayedMartingaleTradesRef.current = 0;
-              currentStakeRef.current = cfg.holdStakeAmount;
-              splitRemainingRef.current = 0;
-              setStatusMsg(
-                shouldHoldForDigitRate && predictedRate !== null
-                  ? `Holding at $${cfg.holdStakeAmount.toFixed(2)} (digit ${cfg.digitPrediction} rate ${predictedRate.toFixed(2)}% >= ${cfg.digitRateThreshold.toFixed(2)}%)`
-                  : `Holding at $${cfg.holdStakeAmount.toFixed(2)} until ${cfg.holdStakeTradeCount} trades complete before martingale`,
-              );
-              openContractIdRef.current = null;
-              openTradeIdsRef.current.delete(contractId);
-              derivApi.unsubscribeOpenContract(contractId);
-              if (runningRef.current) {
-                setTimeout(() => {
-                  if (runningRef.current) placeNextTrade();
-                }, 500);
-              }
-              return;
+          if (cfg.strategy === "ACCUMULATOR") {
+            const growthPercent = Number.isFinite(
+              cfg.accumulatorMartingaleGrowthRate,
+            )
+              ? Math.max(0, cfg.accumulatorMartingaleGrowthRate)
+              : 0;
+            const safeMultiplier = Number.isFinite(
+              cfg.accumulatorMartingaleMultiplier,
+            )
+              ? Math.max(1, cfg.accumulatorMartingaleMultiplier)
+              : 1;
+            const growthFactor = 1 + growthPercent / 100;
+            const safeStake =
+              Number.isFinite(stake) && stake > 0
+                ? stake
+                : Number.isFinite(cfg.initialStake) && cfg.initialStake > 0
+                  ? cfg.initialStake
+                  : 1;
+            const stakeCents = Math.max(1, Math.round(safeStake * 100));
+            let nextStakeCents = Math.round(
+              stakeCents * growthFactor * safeMultiplier,
+            );
+            if (!Number.isFinite(nextStakeCents)) {
+              nextStakeCents = stakeCents + 1;
             }
-          }
+            if (
+              (growthPercent > 0 || safeMultiplier > 1) &&
+              nextStakeCents <= stakeCents
+            ) {
+              nextStakeCents = stakeCents + 1;
+            }
+            currentStakeRef.current = parseFloat(
+              (nextStakeCents / 100).toFixed(2),
+            );
+            console.log("[Bot] Accumulator martingale applied", {
+              previousStake: safeStake,
+              nextStake: currentStakeRef.current,
+              growthPercent,
+              multiplier: safeMultiplier,
+              profit,
+              status,
+            });
+            setStatusMsg(
+              `Accumulator loss: next stake $${currentStakeRef.current.toFixed(2)} (growth ${growthPercent.toFixed(2)}%, multiplier ${safeMultiplier.toFixed(2)}x)`,
+            );
+            splitRemainingRef.current = 0;
+            pendingDelayedMartingaleRef.current = false;
+            pendingDelayedMartingaleTradesRef.current = 0;
+            delayedMartingaleTargetStakeRef.current = null;
+            delayedMartingaleSplitRemainingRef.current = 0;
+          } else {
+            const shouldDelayMartingale =
+              cfg.strategy === "DIGITS_DIFFER" &&
+              (cfg.holdStakeUntilLowDigitRate ||
+                cfg.holdStakeUntilTradeCount) &&
+              Math.abs(stake - cfg.holdStakeAmount) < 0.0001;
 
-          const split =
-            cfg.strategy === "DIGITS_DIFFER" ? cfg.martingaleSplit : 1;
-          const perSplitMultiplier = cfg.martingaleMultiplier / split;
-          pendingDelayedMartingaleRef.current = false;
-          pendingDelayedMartingaleTradesRef.current = 0;
-          delayedMartingaleTargetStakeRef.current = null;
-          delayedMartingaleSplitRemainingRef.current = 0;
-          currentStakeRef.current = parseFloat(
-            (stake * perSplitMultiplier).toFixed(2),
-          );
-          // set how many recovery trades remain (first one will be placed immediately)
-          splitRemainingRef.current = split;
+            if (shouldDelayMartingale) {
+              const predictedRate = cfg.holdStakeUntilLowDigitRate
+                ? getPredictedDigitRate(cfg.digitPrediction)
+                : null;
+              const shouldHoldForDigitRate =
+                cfg.holdStakeUntilLowDigitRate &&
+                predictedRate !== null &&
+                predictedRate >= cfg.digitRateThreshold;
+              const shouldHoldForTradeCount = cfg.holdStakeUntilTradeCount;
+
+              if (shouldHoldForDigitRate || shouldHoldForTradeCount) {
+                const split =
+                  cfg.strategy === "DIGITS_DIFFER" ? cfg.martingaleSplit : 1;
+                delayedMartingaleTargetStakeRef.current = parseFloat(
+                  (
+                    (cfg.holdStakeAmount * cfg.martingaleMultiplier) /
+                    split
+                  ).toFixed(2),
+                );
+                delayedMartingaleSplitRemainingRef.current = split;
+                pendingDelayedMartingaleRef.current = true;
+                pendingDelayedMartingaleTradesRef.current = 0;
+                currentStakeRef.current = cfg.holdStakeAmount;
+                splitRemainingRef.current = 0;
+                setStatusMsg(
+                  shouldHoldForDigitRate && predictedRate !== null
+                    ? `Holding at $${cfg.holdStakeAmount.toFixed(2)} (digit ${cfg.digitPrediction} rate ${predictedRate.toFixed(2)}% >= ${cfg.digitRateThreshold.toFixed(2)}%)`
+                    : `Holding at $${cfg.holdStakeAmount.toFixed(2)} until ${cfg.holdStakeTradeCount} trades complete before martingale`,
+                );
+                openContractIdRef.current = null;
+                openTradeIdsRef.current.delete(contractId);
+                derivApi.unsubscribeOpenContract(contractId);
+                if (runningRef.current) {
+                  queueNextTrade(120);
+                }
+                return;
+              }
+            }
+
+            const split =
+              cfg.strategy === "DIGITS_DIFFER" ? cfg.martingaleSplit : 1;
+            const perSplitMultiplier = cfg.martingaleMultiplier / split;
+            pendingDelayedMartingaleRef.current = false;
+            pendingDelayedMartingaleTradesRef.current = 0;
+            delayedMartingaleTargetStakeRef.current = null;
+            delayedMartingaleSplitRemainingRef.current = 0;
+            currentStakeRef.current = parseFloat(
+              (stake * perSplitMultiplier).toFixed(2),
+            );
+            // set how many recovery trades remain (first one will be placed immediately)
+            splitRemainingRef.current = split;
+          }
         } else {
           pendingDelayedMartingaleRef.current = false;
           pendingDelayedMartingaleTradesRef.current = 0;
@@ -371,11 +674,20 @@ export default function App() {
 
       openContractIdRef.current = null;
       openTradeIdsRef.current.delete(contractId);
+      accumulatorSellPendingRef.current.delete(contractId);
+      accumulatorContractTickCountRef.current.delete(contractId);
+      accumulatorContractLastSpotTimeRef.current.delete(contractId);
       derivApi.unsubscribeOpenContract(contractId);
 
-      if (cfg.takeProfit > 0 && netProfitRef.current >= cfg.takeProfit) {
+      const hitTakeProfitByUsd =
+        cfg.takeProfit > 0 && netProfitRef.current >= cfg.takeProfit;
+      const hitTakeProfitByTicks = false;
+
+      if (hitTakeProfitByUsd || hitTakeProfitByTicks) {
         setStatusMsg(
-          `Take Profit reached: +${netProfitRef.current.toFixed(2)}`,
+          hitTakeProfitByTicks
+            ? `Take Profit reached: ${accumulatorTickProfitRef.current} accumulator ticks`
+            : `Take Profit reached: +${netProfitRef.current.toFixed(2)}`,
         );
         stopBot();
         return;
@@ -387,9 +699,7 @@ export default function App() {
       }
 
       if (runningRef.current) {
-        setTimeout(() => {
-          if (runningRef.current) placeNextTrade();
-        }, 500);
+        queueNextTrade(120);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -419,15 +729,21 @@ export default function App() {
 
   const handleDisconnect = () => {
     stopBot();
+    closeTrackedOpenContracts();
     derivApi.disconnect();
     setConnected(false);
     setBalance(null);
     setLoginId("");
     setStatusMsg("");
     setLastDigits([]);
+    setPriceHistory([]);
     setCurrentPrice("");
     lastDigitsRef.current = [];
-    openTradeIdsRef.current.clear();
+    clearScheduledTrade();
+    accumulatorSellPendingRef.current.clear();
+    accumulatorContractTickCountRef.current.clear();
+    accumulatorContractLastSpotTimeRef.current.clear();
+    accumulatorTickProfitRef.current = 0;
     pendingDelayedMartingaleRef.current = false;
     pendingDelayedMartingaleTradesRef.current = 0;
     delayedMartingaleTargetStakeRef.current = null;
@@ -438,6 +754,7 @@ export default function App() {
   // ─── Bot logic ───────────────────────────────────────────────────────────
   function placeNextTrade() {
     if (!runningRef.current) return;
+    if (openContractIdRef.current || openTradeIdsRef.current.size > 0) return;
     const cfg = configRef.current;
     if (pendingDelayedMartingaleRef.current) {
       pendingDelayedMartingaleTradesRef.current += 1;
@@ -501,7 +818,7 @@ export default function App() {
         durationUnit: cfg.durationUnit,
         amount: stake,
       });
-    } else {
+    } else if (cfg.strategy === "RISE_FALL") {
       let contractType: "CALL" | "PUT";
       if (cfg.contractType === "AUTO") {
         contractType = nextTypeRef.current;
@@ -536,10 +853,44 @@ export default function App() {
         amount: stake,
         basis: "stake",
       });
+    } else {
+      const isAccumulatorRecoveryStake =
+        cfg.martingale && stake > cfg.initialStake + 0.0001;
+      const effectiveAccumulatorGrowthRate = isAccumulatorRecoveryStake
+        ? cfg.accumulatorMartingaleGrowthRate
+        : cfg.accumulatorGrowthRate;
+      const newTrade: TradeRecord = {
+        id: tradeId,
+        contractId: undefined,
+        time: nowStr(),
+        symbol: cfg.symbol,
+        contractType: "ACCU",
+        accumulatorLabelRate: effectiveAccumulatorGrowthRate,
+        stake,
+        payout: null,
+        profit: null,
+        status: "open",
+      };
+      setTrades((prev) => {
+        const next = [...prev, newTrade];
+        return next.length > TRADE_HISTORY_LIMIT
+          ? next.slice(-TRADE_HISTORY_LIMIT)
+          : next;
+      });
+      setStatusMsg(
+        `Placing ACCU (${effectiveAccumulatorGrowthRate.toFixed(0)}% growth) — $${stake.toFixed(2)} stake…`,
+      );
+      openContractIdRef.current = tradeId;
+      derivApi.buyAccumulatorContract({
+        symbol: cfg.symbol,
+        amount: stake,
+        growthRatePercent: effectiveAccumulatorGrowthRate,
+      });
     }
   }
 
   const startBot = () => {
+    closeTrackedOpenContracts();
     runningRef.current = true;
     currentStakeRef.current = config.initialStake;
     netProfitRef.current = 0;
@@ -547,20 +898,27 @@ export default function App() {
     nextTypeRef.current = "CALL";
     splitRemainingRef.current = 0;
     openTradeIdsRef.current.clear();
+    accumulatorSellPendingRef.current.clear();
+    accumulatorContractTickCountRef.current.clear();
+    accumulatorContractLastSpotTimeRef.current.clear();
     pendingDelayedMartingaleRef.current = false;
     pendingDelayedMartingaleTradesRef.current = 0;
     delayedMartingaleTargetStakeRef.current = null;
     delayedMartingaleSplitRemainingRef.current = 0;
+    accumulatorTickProfitRef.current = 0;
     setTrades([]);
     setTotalProfit(0);
     setWins(0);
     setRunning(true);
     setStatusMsg("Bot started — placing first trade…");
+    clearScheduledTrade();
     placeNextTrade();
   };
 
   function stopBot() {
     runningRef.current = false;
+    clearScheduledTrade();
+    closeTrackedOpenContracts();
     setRunning(false);
     setStatusMsg((prev) =>
       prev.startsWith("Take Profit") || prev.startsWith("Stop Loss")
@@ -612,6 +970,9 @@ export default function App() {
             <div className="h-[56%] min-h-0">
               <TradeLog
                 trades={trades}
+                accumulatorDefaultLabelRate={
+                  config.accumulatorMartingaleGrowthRate
+                }
                 totalProfit={totalProfit}
                 totalTrades={trades.filter((t) => t.status !== "open").length}
                 wins={wins}
@@ -625,7 +986,9 @@ export default function App() {
             <div className="flex-1 min-h-0">
               <LastDigitsChart
                 digits={lastDigits}
+                priceHistory={priceHistory}
                 currentPrice={currentPrice}
+                strategy={config.strategy}
                 predictedDigit={config.digitPrediction}
               />
             </div>
