@@ -587,8 +587,8 @@ export default function App() {
             const growthPercent = Number.isFinite(
               cfg.accumulatorMartingaleGrowthRate,
             )
-              ? Math.max(0, cfg.accumulatorMartingaleGrowthRate)
-              : 0;
+              ? Math.min(5, Math.max(1, cfg.accumulatorMartingaleGrowthRate))
+              : 2;
             const safeMultiplier = Number.isFinite(
               cfg.accumulatorMartingaleMultiplier,
             )
@@ -903,9 +903,17 @@ export default function App() {
     } else {
       const isAccumulatorRecoveryStake =
         cfg.martingale && stake > cfg.initialStake + 0.0001;
+      const safeBaseGrowthRate = Number.isFinite(cfg.accumulatorGrowthRate)
+        ? Math.min(5, Math.max(1, cfg.accumulatorGrowthRate))
+        : 1;
+      const safeMartingaleGrowthRate = Number.isFinite(
+        cfg.accumulatorMartingaleGrowthRate,
+      )
+        ? Math.min(5, Math.max(1, cfg.accumulatorMartingaleGrowthRate))
+        : 2;
       const effectiveAccumulatorGrowthRate = isAccumulatorRecoveryStake
-        ? cfg.accumulatorMartingaleGrowthRate
-        : cfg.accumulatorGrowthRate;
+        ? safeMartingaleGrowthRate
+        : safeBaseGrowthRate;
       const newTrade: TradeRecord = {
         id: tradeId,
         contractId: undefined,

@@ -50,6 +50,8 @@ const DURATION_UNITS = [
   { value: "h", label: "Hours" },
 ];
 
+const ACCUMULATOR_GROWTH_OPTIONS = [1, 2, 3, 4, 5] as const;
+
 function Field({
   label,
   children,
@@ -121,6 +123,14 @@ export default function BotConfigPanel({
       !Number.isFinite(config.accumulatorMartingaleGrowthRate)
     ) {
       updates.accumulatorMartingaleGrowthRate = 2;
+    } else if (
+      config.accumulatorMartingaleGrowthRate < 1 ||
+      config.accumulatorMartingaleGrowthRate > 5
+    ) {
+      updates.accumulatorMartingaleGrowthRate = Math.min(
+        5,
+        Math.max(1, Math.round(config.accumulatorMartingaleGrowthRate)),
+      );
     }
     if (
       config.accumulatorMartingaleMultiplier === undefined ||
@@ -383,11 +393,7 @@ export default function BotConfigPanel({
                 <div className="space-y-2">
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Growth per loss (%)">
-                      <Input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.1}
+                      <Select
                         value={config.accumulatorMartingaleGrowthRate}
                         onChange={(e) =>
                           set(
@@ -396,7 +402,13 @@ export default function BotConfigPanel({
                           )
                         }
                         disabled={disabled}
-                      />
+                      >
+                        {ACCUMULATOR_GROWTH_OPTIONS.map((rate) => (
+                          <option key={rate} value={rate}>
+                            {rate}%
+                          </option>
+                        ))}
+                      </Select>
                     </Field>
                     <Field label="Multiplier on loss">
                       <Input
@@ -415,6 +427,23 @@ export default function BotConfigPanel({
                       />
                     </Field>
                   </div>
+                  {config.accumulatorTakeProfitMode === "TICKS" && (
+                    <Field label="Take Profit (Ticks)">
+                      <Input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={config.accumulatorTakeProfitTicks}
+                        onChange={(e) =>
+                          set(
+                            "accumulatorTakeProfitTicks",
+                            Number(e.target.value),
+                          )
+                        }
+                        disabled={disabled}
+                      />
+                    </Field>
+                  )}
                   <div className="flex items-center justify-between">
                     <span className="text-gray-300 text-xs">
                       Delay Martingale
