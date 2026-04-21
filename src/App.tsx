@@ -18,6 +18,7 @@ const DEFAULT_CONFIG: BotConfig = {
   takeProfit: 10,
   accumulatorTakeProfitMode: "USD",
   accumulatorTakeProfitTicks: 20,
+  accumulatorMartingaleTakeProfitTicks: 20,
   accumulatorGrowthRate: 1,
   accumulatorMartingaleGrowthRate: 2,
   accumulatorMartingaleMultiplier: 1,
@@ -184,6 +185,7 @@ export default function App() {
   const accumulatorPendingMartingaleRef = useRef(false);
   const accumulatorPendingMartingaleStakeRef = useRef<number | null>(null);
   const accumulatorPendingMartingaleWinsRef = useRef(0);
+  const accumulatorPendingMartingaleLossesRef = useRef(0);
   const accumulatorSellPendingRef = useRef<Set<string>>(new Set());
   const accumulatorContractTickCountRef = useRef<Map<string, number>>(
     new Map(),
@@ -458,8 +460,18 @@ export default function App() {
       if (
         cfg.strategy === "ACCUMULATOR" &&
         cfg.accumulatorTakeProfitMode === "TICKS" &&
-        cfg.accumulatorTakeProfitTicks > 0 &&
-        normalizedLiveTickCount >= cfg.accumulatorTakeProfitTicks &&
+        (() => {
+          const isMartingaleRecoveryStake =
+            cfg.martingale &&
+            currentStakeRef.current > cfg.initialStake + 0.0001;
+          const effectiveTakeProfitTicks = isMartingaleRecoveryStake
+            ? cfg.accumulatorMartingaleTakeProfitTicks
+            : cfg.accumulatorTakeProfitTicks;
+          return (
+            effectiveTakeProfitTicks > 0 &&
+            normalizedLiveTickCount >= effectiveTakeProfitTicks
+          );
+        })() &&
         Number(poc.is_sold) !== 1 &&
         poc.status !== "sold" &&
         !accumulatorSellPendingRef.current.has(contractId)
@@ -541,19 +553,24 @@ export default function App() {
             const pendingStake =
               accumulatorPendingMartingaleStakeRef.current ??
               configRef.current.initialStake;
+            const recoveredLosses =
+              accumulatorPendingMartingaleLossesRef.current;
             currentStakeRef.current = pendingStake;
             accumulatorPendingMartingaleRef.current = false;
             accumulatorPendingMartingaleStakeRef.current = null;
             accumulatorPendingMartingaleWinsRef.current = 0;
+            accumulatorPendingMartingaleLossesRef.current = 0;
             setStatusMsg(
-              `Delay complete: applying martingale — next stake $${pendingStake.toFixed(2)}`,
+              recoveredLosses > 0
+                ? `Delay complete: ${recoveredLosses} queued loss(es) recovered — next stake $${pendingStake.toFixed(2)}`
+                : `Delay complete: applying martingale — next stake $${pendingStake.toFixed(2)}`,
             );
           } else {
             currentStakeRef.current = configRef.current.initialStake;
             const remaining =
               winsNeeded - accumulatorPendingMartingaleWinsRef.current;
             setStatusMsg(
-              `Won (delay martingale): ${remaining} more win(s) before $${(accumulatorPendingMartingaleStakeRef.current ?? configRef.current.initialStake).toFixed(2)} stake`,
+              `Won (delay martingale): ${remaining} more win(s) before $${(accumulatorPendingMartingaleStakeRef.current ?? configRef.current.initialStake).toFixed(2)} stake (${accumulatorPendingMartingaleLossesRef.current} queued loss(es))`,
             );
           }
         } else if (pendingDelayedMartingaleRef.current) {
@@ -587,7 +604,9 @@ export default function App() {
             const growthPercent = Number.isFinite(
               cfg.accumulatorMartingaleGrowthRate,
             )
-              ? Math.min(5, Math.max(1, cfg.accumulatorMartingaleGrowthRate))
+              ? Math.round(
+                  Math.min(5, Math.max(1, cfg.accumulatorMartingaleGrowthRate)),
+                )
               : 2;
             const safeMultiplier = Number.isFinite(
               cfg.accumulatorMartingaleMultiplier,
@@ -601,8 +620,13 @@ export default function App() {
                 : Number.isFinite(cfg.initialStake) && cfg.initialStake > 0
                   ? cfg.initialStake
                   : 1;
-            const stakeCents = Math.max(1, Math.round(safeStake * 100));
-            let nextStakeCents = Math.round(
+            const pendingStakeBase =
+              accumulatorPendingMartingaleRef.current &&
+              accumulatorPendingMartingaleStakeRef.current !== null
+                ? accumulatorPendingMartingaleStakeRef.current
+                : safeStake;
+            const stakeCents = Math.max(1, Math.round(pendingStakeBase * 100));
+            let nextStakeCents = Math.ceil(
               stakeCents * growthFactor * safeMultiplier,
             );
             if (!Number.isFinite(nextStakeCents)) {
@@ -627,18 +651,30 @@ export default function App() {
               cfg.accumulatorDelayMartingale &&
               cfg.accumulatorDelayTrades > 0
             ) {
-              // Save the stake for later; hold at initial stake until wins counted
+              // Keep compounding pending losses during delay so recovery stake
+              // reflects all losses before activation.
+              const hadPendingBeforeLoss =
+                accumulatorPendingMartingaleRef.current &&
+                accumulatorPendingMartingaleStakeRef.current !== null;
               accumulatorPendingMartingaleStakeRef.current = computedNextStake;
               accumulatorPendingMartingaleRef.current = true;
               accumulatorPendingMartingaleWinsRef.current = 0;
+              accumulatorPendingMartingaleLossesRef.current =
+                hadPendingBeforeLoss
+                  ? accumulatorPendingMartingaleLossesRef.current + 1
+                  : 1;
               currentStakeRef.current = configRef.current.initialStake;
               setStatusMsg(
-                `Loss: martingale delayed — waiting ${cfg.accumulatorDelayTrades} win(s) before $${computedNextStake.toFixed(2)} stake`,
+                `Loss: martingale delayed — ${accumulatorPendingMartingaleLossesRef.current} queued loss(es), waiting ${cfg.accumulatorDelayTrades} win(s) before $${computedNextStake.toFixed(2)} stake`,
               );
             } else {
+              accumulatorPendingMartingaleRef.current = false;
+              accumulatorPendingMartingaleStakeRef.current = null;
+              accumulatorPendingMartingaleWinsRef.current = 0;
+              accumulatorPendingMartingaleLossesRef.current = 0;
               currentStakeRef.current = computedNextStake;
               console.log("[Bot] Accumulator martingale applied", {
-                previousStake: safeStake,
+                previousStake: pendingStakeBase,
                 nextStake: currentStakeRef.current,
                 growthPercent,
                 multiplier: safeMultiplier,
@@ -795,6 +831,7 @@ export default function App() {
     accumulatorPendingMartingaleRef.current = false;
     accumulatorPendingMartingaleStakeRef.current = null;
     accumulatorPendingMartingaleWinsRef.current = 0;
+    accumulatorPendingMartingaleLossesRef.current = 0;
     subscribedSymbolRef.current = null;
   };
 
@@ -909,7 +946,9 @@ export default function App() {
       const safeMartingaleGrowthRate = Number.isFinite(
         cfg.accumulatorMartingaleGrowthRate,
       )
-        ? Math.min(5, Math.max(1, cfg.accumulatorMartingaleGrowthRate))
+        ? Math.round(
+            Math.min(5, Math.max(1, cfg.accumulatorMartingaleGrowthRate)),
+          )
         : 2;
       const effectiveAccumulatorGrowthRate = isAccumulatorRecoveryStake
         ? safeMartingaleGrowthRate
@@ -963,6 +1002,7 @@ export default function App() {
     accumulatorPendingMartingaleRef.current = false;
     accumulatorPendingMartingaleStakeRef.current = null;
     accumulatorPendingMartingaleWinsRef.current = 0;
+    accumulatorPendingMartingaleLossesRef.current = 0;
     accumulatorTickProfitRef.current = 0;
     setTrades([]);
     setTotalProfit(0);

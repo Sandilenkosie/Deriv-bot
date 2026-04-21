@@ -11,6 +11,7 @@ export interface BotConfig {
   takeProfit: number;
   accumulatorTakeProfitMode: "USD" | "TICKS";
   accumulatorTakeProfitTicks: number;
+  accumulatorMartingaleTakeProfitTicks: number;
   accumulatorGrowthRate: number;
   accumulatorMartingaleGrowthRate: number;
   accumulatorMartingaleMultiplier: number;
@@ -146,6 +147,12 @@ export default function BotConfigPanel({
       config.accumulatorDelayTrades < 1
     ) {
       updates.accumulatorDelayTrades = 3;
+    }
+    if (
+      !Number.isFinite(config.accumulatorMartingaleTakeProfitTicks) ||
+      config.accumulatorMartingaleTakeProfitTicks < 1
+    ) {
+      updates.accumulatorMartingaleTakeProfitTicks = 20;
     }
     if (Object.keys(updates).length > 0) {
       onChange({ ...config, ...updates });
@@ -428,15 +435,15 @@ export default function BotConfigPanel({
                     </Field>
                   </div>
                   {config.accumulatorTakeProfitMode === "TICKS" && (
-                    <Field label="Take Profit (Ticks)">
+                    <Field label="Take Profit (Ticks) on martingale">
                       <Input
                         type="number"
                         min={1}
                         step={1}
-                        value={config.accumulatorTakeProfitTicks}
+                        value={config.accumulatorMartingaleTakeProfitTicks}
                         onChange={(e) =>
                           set(
-                            "accumulatorTakeProfitTicks",
+                            "accumulatorMartingaleTakeProfitTicks",
                             Number(e.target.value),
                           )
                         }

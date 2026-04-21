@@ -114,8 +114,10 @@ class DerivApiService {
     growthRatePercent: number;
   }) {
     const rawRate = Number(params.growthRatePercent);
-    const decimalRate = rawRate > 0.05 ? rawRate / 100 : rawRate;
-    const growthRate = Math.min(0.05, Math.max(0.01, decimalRate));
+    const percentRate = rawRate <= 0.05 ? rawRate * 100 : rawRate;
+    const normalizedPercent = Math.round(percentRate);
+    const clampedPercent = Math.min(5, Math.max(1, normalizedPercent));
+    const growthRate = clampedPercent / 100;
 
     return this.send({
       buy: 1,
@@ -125,7 +127,7 @@ class DerivApiService {
         symbol: params.symbol,
         amount: params.amount,
         basis: "stake",
-        growth_rate: Number(growthRate.toFixed(2)),
+        growth_rate: growthRate,
         currency: "USD",
       },
     });
