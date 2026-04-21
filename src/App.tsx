@@ -21,6 +21,8 @@ const DEFAULT_CONFIG: BotConfig = {
   accumulatorGrowthRate: 1,
   accumulatorMartingaleGrowthRate: 2,
   accumulatorMartingaleMultiplier: 1,
+  accumulatorDelayMartingale: false,
+  accumulatorDelayTrades: 3,
   stopLoss: 10,
   martingale: true,
   martingaleMultiplier: 11,
@@ -179,6 +181,9 @@ export default function App() {
   // split-martingale: how many recovery trades still need to win (0 = normal)
   const splitRemainingRef = useRef(0);
   const accumulatorTickProfitRef = useRef(0);
+  const accumulatorPendingMartingaleRef = useRef(false);
+  const accumulatorPendingMartingaleStakeRef = useRef<number | null>(null);
+  const accumulatorPendingMartingaleWinsRef = useRef(0);
   const accumulatorSellPendingRef = useRef<Set<string>>(new Set());
   const accumulatorContractTickCountRef = useRef<Map<string, number>>(
     new Map(),
@@ -526,7 +531,32 @@ export default function App() {
       if (won) {
         winsRef.current += 1;
         setWins(winsRef.current);
-        if (pendingDelayedMartingaleRef.current) {
+        if (
+          cfg.strategy === "ACCUMULATOR" &&
+          accumulatorPendingMartingaleRef.current
+        ) {
+          accumulatorPendingMartingaleWinsRef.current += 1;
+          const winsNeeded = Math.max(1, cfg.accumulatorDelayTrades);
+          if (accumulatorPendingMartingaleWinsRef.current >= winsNeeded) {
+            const pendingStake =
+              accumulatorPendingMartingaleStakeRef.current ??
+              configRef.current.initialStake;
+            currentStakeRef.current = pendingStake;
+            accumulatorPendingMartingaleRef.current = false;
+            accumulatorPendingMartingaleStakeRef.current = null;
+            accumulatorPendingMartingaleWinsRef.current = 0;
+            setStatusMsg(
+              `Delay complete: applying martingale — next stake $${pendingStake.toFixed(2)}`,
+            );
+          } else {
+            currentStakeRef.current = configRef.current.initialStake;
+            const remaining =
+              winsNeeded - accumulatorPendingMartingaleWinsRef.current;
+            setStatusMsg(
+              `Won (delay martingale): ${remaining} more win(s) before $${(accumulatorPendingMartingaleStakeRef.current ?? configRef.current.initialStake).toFixed(2)} stake`,
+            );
+          }
+        } else if (pendingDelayedMartingaleRef.current) {
           currentStakeRef.current = cfg.holdStakeAmount;
           splitRemainingRef.current = 0;
         } else if (splitRemainingRef.current > 0) {
@@ -584,25 +614,39 @@ export default function App() {
             ) {
               nextStakeCents = stakeCents + 1;
             }
-            currentStakeRef.current = parseFloat(
+            const computedNextStake = parseFloat(
               (nextStakeCents / 100).toFixed(2),
-            );
-            console.log("[Bot] Accumulator martingale applied", {
-              previousStake: safeStake,
-              nextStake: currentStakeRef.current,
-              growthPercent,
-              multiplier: safeMultiplier,
-              profit,
-              status,
-            });
-            setStatusMsg(
-              `Accumulator loss: next stake $${currentStakeRef.current.toFixed(2)} (growth ${growthPercent.toFixed(2)}%, multiplier ${safeMultiplier.toFixed(2)}x)`,
             );
             splitRemainingRef.current = 0;
             pendingDelayedMartingaleRef.current = false;
             pendingDelayedMartingaleTradesRef.current = 0;
             delayedMartingaleTargetStakeRef.current = null;
             delayedMartingaleSplitRemainingRef.current = 0;
+
+            if (
+              cfg.accumulatorDelayMartingale &&
+              cfg.accumulatorDelayTrades > 0
+            ) {
+              // Save the stake for later; hold at initial stake until wins counted
+              accumulatorPendingMartingaleStakeRef.current = computedNextStake;
+              accumulatorPendingMartingaleRef.current = true;
+              accumulatorPendingMartingaleWinsRef.current = 0;
+              currentStakeRef.current = configRef.current.initialStake;
+              setStatusMsg(
+                `Loss: martingale delayed — waiting ${cfg.accumulatorDelayTrades} win(s) before $${computedNextStake.toFixed(2)} stake`,
+              );
+            } else {
+              currentStakeRef.current = computedNextStake;
+              console.log("[Bot] Accumulator martingale applied", {
+                previousStake: safeStake,
+                nextStake: currentStakeRef.current,
+                growthPercent,
+                multiplier: safeMultiplier,
+              });
+              setStatusMsg(
+                `Accumulator loss: next stake $${currentStakeRef.current.toFixed(2)} (growth ${growthPercent.toFixed(2)}%, multiplier ${safeMultiplier.toFixed(2)}x)`,
+              );
+            }
           } else {
             const shouldDelayMartingale =
               cfg.strategy === "DIGITS_DIFFER" &&
@@ -748,6 +792,9 @@ export default function App() {
     pendingDelayedMartingaleTradesRef.current = 0;
     delayedMartingaleTargetStakeRef.current = null;
     delayedMartingaleSplitRemainingRef.current = 0;
+    accumulatorPendingMartingaleRef.current = false;
+    accumulatorPendingMartingaleStakeRef.current = null;
+    accumulatorPendingMartingaleWinsRef.current = 0;
     subscribedSymbolRef.current = null;
   };
 
@@ -905,6 +952,9 @@ export default function App() {
     pendingDelayedMartingaleTradesRef.current = 0;
     delayedMartingaleTargetStakeRef.current = null;
     delayedMartingaleSplitRemainingRef.current = 0;
+    accumulatorPendingMartingaleRef.current = false;
+    accumulatorPendingMartingaleStakeRef.current = null;
+    accumulatorPendingMartingaleWinsRef.current = 0;
     accumulatorTickProfitRef.current = 0;
     setTrades([]);
     setTotalProfit(0);

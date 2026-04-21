@@ -14,6 +14,8 @@ export interface BotConfig {
   accumulatorGrowthRate: number;
   accumulatorMartingaleGrowthRate: number;
   accumulatorMartingaleMultiplier: number;
+  accumulatorDelayMartingale: boolean;
+  accumulatorDelayTrades: number;
   stopLoss: number;
   martingale: boolean;
   martingaleMultiplier: number;
@@ -125,6 +127,15 @@ export default function BotConfigPanel({
       !Number.isFinite(config.accumulatorMartingaleMultiplier)
     ) {
       updates.accumulatorMartingaleMultiplier = 1;
+    }
+    if (config.accumulatorDelayMartingale === undefined) {
+      updates.accumulatorDelayMartingale = false;
+    }
+    if (
+      !Number.isFinite(config.accumulatorDelayTrades) ||
+      config.accumulatorDelayTrades < 1
+    ) {
+      updates.accumulatorDelayTrades = 3;
     }
     if (Object.keys(updates).length > 0) {
       onChange({ ...config, ...updates });
@@ -369,39 +380,96 @@ export default function BotConfigPanel({
           {config.martingale && (
             <>
               {isAccumulator ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Growth per loss (%)">
-                    <Input
-                      type="number"
-                      min={0}
-                      max={100}
-                      step={0.1}
-                      value={config.accumulatorMartingaleGrowthRate}
-                      onChange={(e) =>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Growth per loss (%)">
+                      <Input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.1}
+                        value={config.accumulatorMartingaleGrowthRate}
+                        onChange={(e) =>
+                          set(
+                            "accumulatorMartingaleGrowthRate",
+                            Number(e.target.value),
+                          )
+                        }
+                        disabled={disabled}
+                      />
+                    </Field>
+                    <Field label="Multiplier on loss">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={0.01}
+                        value={config.accumulatorMartingaleMultiplier}
+                        onChange={(e) =>
+                          set(
+                            "accumulatorMartingaleMultiplier",
+                            Number(e.target.value),
+                          )
+                        }
+                        disabled={disabled}
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-300 text-xs">
+                      Delay Martingale
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
                         set(
-                          "accumulatorMartingaleGrowthRate",
-                          Number(e.target.value),
+                          "accumulatorDelayMartingale",
+                          !config.accumulatorDelayMartingale,
                         )
                       }
                       disabled={disabled}
-                    />
-                  </Field>
-                  <Field label="Multiplier on loss">
-                    <Input
-                      type="number"
-                      min={1}
-                      max={100}
-                      step={0.01}
-                      value={config.accumulatorMartingaleMultiplier}
-                      onChange={(e) =>
-                        set(
-                          "accumulatorMartingaleMultiplier",
-                          Number(e.target.value),
-                        )
-                      }
-                      disabled={disabled}
-                    />
-                  </Field>
+                      aria-pressed={config.accumulatorDelayMartingale}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                        config.accumulatorDelayMartingale
+                          ? "border-cyan-500 bg-cyan-600/15 text-cyan-100"
+                          : "border-gray-600 bg-gray-800 text-gray-300"
+                      }`}
+                    >
+                      <span>
+                        {config.accumulatorDelayMartingale ? "ON" : "OFF"}
+                      </span>
+                      <span
+                        className={`relative h-4 w-7 rounded-full border transition-colors ${
+                          config.accumulatorDelayMartingale
+                            ? "border-cyan-400 bg-cyan-500/30"
+                            : "border-gray-500 bg-gray-700"
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-all ${
+                            config.accumulatorDelayMartingale
+                              ? "right-0.5"
+                              : "left-0.5"
+                          }`}
+                        />
+                      </span>
+                    </button>
+                  </div>
+                  {config.accumulatorDelayMartingale && (
+                    <Field label="Wins before martingale">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={50}
+                        step={1}
+                        value={config.accumulatorDelayTrades}
+                        onChange={(e) =>
+                          set("accumulatorDelayTrades", Number(e.target.value))
+                        }
+                        disabled={disabled}
+                      />
+                    </Field>
+                  )}
                 </div>
               ) : (
                 <Field label="Multiplier on loss">
